@@ -38,24 +38,17 @@ jobs:
       - name: Check for new version
         id: check
         run: |
-          curl -sSf "${XAPK_BASE}/manifest.json" -o manifest.json
-
-          LATEST=$(jq '
-            [.[] | select(.fileName | contains("com.aniplex.fategrandorder.combined.xapk"))]
-            | sort_by(.uploadTimestamp) | last
-          ' manifest.json)
-
-          FILE_NAME=$(echo "$LATEST" | jq -r .fileName)
-          TS=$(echo "$LATEST" | jq -r .uploadTimestamp)
-          SHA1=$(echo "$LATEST" | jq -r .contentSHA1)
-
-          echo "Latest: $FILE_NAME"
-          echo "timestamp: $TS  sha1: $SHA1"
+          # 从 current_ver.json 获取 JP 64 位版本
+          curl -sSf -H "User-Agent: Mozilla/5.0" "${XAPK_BASE}/current_ver.json" -o current_ver.json
+          VER=$(python3 -c "import json; print(json.load(open('current_ver.json'))['JP'])")
+          XAPK_FILE="com.aniplex.fategrandorder.v${VER}.xapk"
+          XAPK_URL="${XAPK_BASE}/${XAPK_FILE}"
+          echo "Latest: $VER → $XAPK_URL"
 
           if [ -f .last-version ]; then
             OLD=$(cat .last-version)
             echo "Cached: $OLD"
-            if [ "$SHA1" = "$OLD" ] && [ -n "$SHA1" ] && [ "$SHA1" != "null" ] && [ "$SHA1" != "none" ]; then
+            if [ "$VER" = "$OLD" ]; then
               echo "→ Version unchanged, skipping."
               echo "skip=true" >> $GITHUB_OUTPUT
               exit 0
@@ -64,8 +57,8 @@ jobs:
 
           echo "→ New version detected!"
           echo "skip=false" >> $GITHUB_OUTPUT
-          echo "xapk_file=$FILE_NAME" >> $GITHUB_OUTPUT
-          echo "xapk_sha1=$SHA1" >> $GITHUB_OUTPUT
+          echo "xapk_url=$XAPK_URL" >> $GITHUB_OUTPUT
+          echo "xapk_ver=$VER" >> $GITHUB_OUTPUT
 
       # ═══════════════════════════════════════
       # 2. 环境：Rust + Java + 安卓工具
@@ -84,11 +77,10 @@ jobs:
       - name: Install apktool & apksigner
         if: steps.check.outputs.skip != 'true'
         run: |
-          # apktool
+          # apktool 3.0.2
           mkdir -p ~/local/bin
           wget -q -O ~/local/bin/apktool     https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool
-          APKTOOL_VER=3.0.0
-          wget -q -O ~/local/bin/apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v${APKTOOL_VER}/apktool_${APKTOOL_VER}.jar
+          wget -q -O ~/local/bin/apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v3.0.2/apktool_3.0.2.jar
           chmod +x ~/local/bin/apktool ~/local/bin/apktool.jar
 
           # Android SDK build-tools → apksigner
@@ -121,7 +113,7 @@ jobs:
       - name: Download XAPK
         if: steps.check.outputs.skip != 'true'
         run: |
-          curl -sSf -o game.xapk "${XAPK_BASE}/${{ steps.check.outputs.xapk_file }}"
+          curl -sSf -o game.xapk "${{ steps.check.outputs.xapk_url }}"
           ls -lh game.xapk
 
       # ═══════════════════════════════════════
@@ -197,7 +189,7 @@ jobs:
 
       - name: Save version cache
         if: steps.check.outputs.skip != 'true'
-        run: echo "${{ steps.check.outputs.xapk_sha1 }}" > .last-version
+        run: echo "${{ steps.check.outputs.xapk_ver }}" > .last-version
 
       - name: Persist version cache
         if: steps.check.outputs.skip != 'true'
