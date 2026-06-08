@@ -113,7 +113,7 @@ jobs:
       - name: Download XAPK
         if: steps.check.outputs.skip != 'true'
         run: |
-          curl -sSf -o game.xapk "${{ steps.check.outputs.xapk_url }}"
+          curl -sSf -H "User-Agent: Mozilla/5.0" -o game.xapk "${{ steps.check.outputs.xapk_url }}"
           ls -lh game.xapk
 
       # ═══════════════════════════════════════
