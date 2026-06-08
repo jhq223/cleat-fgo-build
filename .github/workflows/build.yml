@@ -113,8 +113,9 @@ jobs:
       - name: Download XAPK
         if: steps.check.outputs.skip != 'true'
         run: |
-          curl -sSf -H "User-Agent: Mozilla/5.0" -o game.xapk "${{ steps.check.outputs.xapk_url }}"
+          curl -v -L -H "User-Agent: Mozilla/5.0" -H "Accept: */*" -o game.xapk "${{ steps.check.outputs.xapk_url }}"
           ls -lh game.xapk
+          file game.xapk
 
       # ═══════════════════════════════════════
       # 5. 签名 keystore
