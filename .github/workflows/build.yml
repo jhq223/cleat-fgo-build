@@ -1,0 +1,207 @@
+name: Build FGO Mod APK (JP)
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+  schedule:
+    # FGO 日服维护窗口 (JST → UTC)
+    # 版本更新: 水/金 JST 13:00-18:00 → UTC 04:00-09:00
+    # 大型活动/卡池: JST 18:00 → UTC 09:00
+    # 日常更新: CST 17:00/19:00 → UTC 09:00/11:00
+    - cron: "0 4,6,9,11 * * 3,5"
+
+env:
+  XAPK_BASE: https://fgo.bigcereal.com/apk
+  HELPER_REPO: https://github.com/jhq223/cleat-fgo-helper.git
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ═══════════════════════════════════════
+      # 1. 检查新版本
+      # ═══════════════════════════════════════
+      - name: Restore version cache
+        id: version-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .last-version
+          key: fgo-jp-xapk-version
+
+      - name: Check for new version
+        id: check
+        run: |
+          curl -sSf "${XAPK_BASE}/manifest.json" -o manifest.json
+
+          LATEST=$(jq '
+            [.[] | select(.fileName | contains("com.aniplex.fategrandorder.combined.xapk"))]
+            | sort_by(.uploadTimestamp) | last
+          ' manifest.json)
+
+          FILE_NAME=$(echo "$LATEST" | jq -r .fileName)
+          TS=$(echo "$LATEST" | jq -r .uploadTimestamp)
+          SHA1=$(echo "$LATEST" | jq -r .contentSHA1)
+
+          echo "Latest: $FILE_NAME"
+          echo "timestamp: $TS  sha1: $SHA1"
+
+          if [ -f .last-version ]; then
+            OLD=$(cat .last-version)
+            echo "Cached: $OLD"
+            if [ "$SHA1" = "$OLD" ] && [ -n "$SHA1" ] && [ "$SHA1" != "null" ] && [ "$SHA1" != "none" ]; then
+              echo "→ Version unchanged, skipping."
+              echo "skip=true" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          fi
+
+          echo "→ New version detected!"
+          echo "skip=false" >> $GITHUB_OUTPUT
+          echo "xapk_file=$FILE_NAME" >> $GITHUB_OUTPUT
+          echo "xapk_sha1=$SHA1" >> $GITHUB_OUTPUT
+
+      # ═══════════════════════════════════════
+      # 2. 环境：Rust + Java + 安卓工具
+      # ═══════════════════════════════════════
+      - name: Setup Rust
+        if: steps.check.outputs.skip != 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Java
+        if: steps.check.outputs.skip != 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install apktool & apksigner
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          # apktool
+          mkdir -p ~/local/bin
+          wget -q -O ~/local/bin/apktool     https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool
+          APKTOOL_VER=3.0.0
+          wget -q -O ~/local/bin/apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v${APKTOOL_VER}/apktool_${APKTOOL_VER}.jar
+          chmod +x ~/local/bin/apktool ~/local/bin/apktool.jar
+
+          # Android SDK build-tools → apksigner
+          ANDROID_HOME=$HOME/android-sdk
+          mkdir -p $ANDROID_HOME/cmdline-tools
+          cd $ANDROID_HOME/cmdline-tools
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          unzip -q commandlinetools-linux-11076708_latest.zip
+          mv cmdline-tools latest
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --sdk_root=$ANDROID_HOME "build-tools;35.0.0" > /dev/null 2>&1
+
+          echo "$HOME/local/bin" >> $GITHUB_PATH
+          echo "$ANDROID_HOME/build-tools/35.0.0" >> $GITHUB_PATH
+
+      # ═══════════════════════════════════════
+      # 3. 编译 fgo-helper
+      # ═══════════════════════════════════════
+      - name: Build fgo-helper
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          git clone --depth 1 "${HELPER_REPO}" /tmp/cleat-fgo-helper
+          cd /tmp/cleat-fgo-helper
+          cargo build --release
+          cp target/release/fgo-helper "$GITHUB_WORKSPACE/fgo-helper"
+          echo "fgo-helper: $(file "$GITHUB_WORKSPACE/fgo-helper")"
+
+      # ═══════════════════════════════════════
+      # 4. 下载 XAPK
+      # ═══════════════════════════════════════
+      - name: Download XAPK
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          curl -sSf -o game.xapk "${XAPK_BASE}/${{ steps.check.outputs.xapk_file }}"
+          ls -lh game.xapk
+
+      # ═══════════════════════════════════════
+      # 5. 签名 keystore
+      # ═══════════════════════════════════════
+      - name: Prepare keystore
+        if: steps.check.outputs.skip != 'true'
+        env:
+          KS_B64: ${{ secrets.KEYSTORE_BASE64 }}
+          KS_PASS_SE: ${{ secrets.KEYSTORE_PASS }}
+          KS_ALIAS_SE: ${{ secrets.KEY_ALIAS }}
+        run: |
+          if [ -z "$KS_B64" ]; then
+            echo "ERROR: KEYSTORE_BASE64 secret is required"
+            exit 1
+          fi
+          echo "$KS_B64" | base64 -d > keystore.keystore
+          echo "KS_PASS=${KS_PASS_SE}" >> $GITHUB_ENV
+          echo "KS_ALIAS=${KS_ALIAS_SE}" >> $GITHUB_ENV
+
+      # ═══════════════════════════════════════
+      # 6. Patch & 签名
+      # ═══════════════════════════════════════
+      - name: Setup & decompile
+        if: steps.check.outputs.skip != 'true'
+        run: ./fgo-helper apk setup --xapk game.xapk
+
+      - name: Build & sign
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          ./fgo-helper apk build \
+            --ks keystore.keystore \
+            --ks-pass "${KS_PASS}" \
+            --ks-alias "${KS_ALIAS}" \
+            --lib-dir lib/
+          ls -lh dist/
+
+      # ═══════════════════════════════════════
+      # 7. 提取版本号
+      # ═══════════════════════════════════════
+      - name: Extract FGO version
+        id: version
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          VER=$(grep -oP 'versionName:\s*\K.*' build/apktool_main/apktool.yml | tr -d "'" | xargs)
+          echo "FGO version: $VER"
+          echo "tag=v${VER}" >> $GITHUB_OUTPUT
+          echo "name=FGO JP v${VER} (Mod)" >> $GITHUB_OUTPUT
+
+      # ═══════════════════════════════════════
+      # 8. 发 Release + 打 Tag
+      # ═══════════════════════════════════════
+      - name: Create Release
+        if: steps.check.outputs.skip != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.name }}
+          files: dist/fgo-mod.apk
+          generate_release_notes: true
+          make_latest: true
+
+      # ═══════════════════════════════════════
+      # 9. 上传 artifact & 缓存版本
+      # ═══════════════════════════════════════
+      - name: Upload APK artifact
+        if: steps.check.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fgo-mod-jp
+          path: dist/fgo-mod.apk
+          retention-days: 30
+
+      - name: Save version cache
+        if: steps.check.outputs.skip != 'true'
+        run: echo "${{ steps.check.outputs.xapk_sha1 }}" > .last-version
+
+      - name: Persist version cache
+        if: steps.check.outputs.skip != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .last-version
+          key: fgo-jp-xapk-version
