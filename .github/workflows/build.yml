@@ -15,6 +15,7 @@ on:
 env:
   XAPK_BASE: https://fgo.bigcereal.com/apk
   HELPER_REPO: https://github.com/jhq223/cleat-fgo-helper.git
+  MOD_RELEASES_API: https://api.github.com/repos/jhq223/cleat-fgo/releases/latest
 
 jobs:
   build:
@@ -38,7 +39,6 @@ jobs:
       - name: Check for new version
         id: check
         run: |
-          # 从 current_ver.json 获取 JP 64 位版本
           curl -sSf -H "User-Agent: Mozilla/5.0" "${XAPK_BASE}/current_ver.json" -o current_ver.json
           VER=$(python3 -c "import json; print(json.load(open('current_ver.json'))['JP'])")
           XAPK_FILE="com.aniplex.fategrandorder.v${VER}.xapk"
@@ -108,7 +108,24 @@ jobs:
           echo "fgo-helper: $(file "$GITHUB_WORKSPACE/fgo-helper")"
 
       # ═══════════════════════════════════════
-      # 4. 下载 XAPK
+      # 4. 下载 mod libs (from cleat-fgo latest release)
+      # ═══════════════════════════════════════
+      - name: Download mod libs
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          # Query latest release, find the zip asset, download and extract
+          ASSET_URL=$(curl -sSf -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "${MOD_RELEASES_API}" | \
+            python3 -c "import sys,json; r=json.load(sys.stdin); print(next(a['browser_download_url'] for a in r['assets'] if a['name'].endswith('.zip')))")
+          echo "Downloading: $ASSET_URL"
+          curl -sSfL -o libs.zip "$ASSET_URL"
+          mkdir -p lib
+          unzip -o libs.zip -d lib/
+          echo "Libs:"
+          ls -lh lib/
+
+      # ═══════════════════════════════════════
+      # 5. 下载 XAPK
       # ═══════════════════════════════════════
       - name: Download XAPK
         if: steps.check.outputs.skip != 'true'
@@ -117,7 +134,7 @@ jobs:
           ls -lh game.xapk
 
       # ═══════════════════════════════════════
-      # 5. 签名 keystore
+      # 6. 签名 keystore
       # ═══════════════════════════════════════
       - name: Prepare keystore
         if: steps.check.outputs.skip != 'true'
@@ -135,7 +152,7 @@ jobs:
           echo "KS_ALIAS=${KS_ALIAS_SE}" >> $GITHUB_ENV
 
       # ═══════════════════════════════════════
-      # 6. Patch & 签名
+      # 7. Patch & 签名
       # ═══════════════════════════════════════
       - name: Setup & decompile
         if: steps.check.outputs.skip != 'true'
@@ -152,9 +169,9 @@ jobs:
           ls -lh dist/
 
       # ═══════════════════════════════════════
-      # 7. 提取版本号
+      # 8. 提取版本号 & mod 版本
       # ═══════════════════════════════════════
-      - name: Extract FGO version
+      - name: Extract versions
         id: version
         if: steps.check.outputs.skip != 'true'
         run: |
@@ -163,8 +180,15 @@ jobs:
           echo "tag=v${VER}" >> $GITHUB_OUTPUT
           echo "name=FGO JP v${VER} (Mod)" >> $GITHUB_OUTPUT
 
+          # mod lib version from the release tag we downloaded
+          MOD_VER=$(curl -sSf -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "${MOD_RELEASES_API}" | \
+            python3 -c "import sys,json; r=json.load(sys.stdin); print(r['tag_name'])")
+          echo "Mod lib version: $MOD_VER"
+          echo "mod_ver=$MOD_VER" >> $GITHUB_OUTPUT
+
       # ═══════════════════════════════════════
-      # 8. 发 Release + 打 Tag
+      # 9. 发 Release + 打 Tag
       # ═══════════════════════════════════════
       - name: Create Release
         if: steps.check.outputs.skip != 'true'
@@ -172,12 +196,19 @@ jobs:
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: ${{ steps.version.outputs.name }}
+          body: |
+            FGO 日服 v${{ steps.check.outputs.xapk_ver }}
+
+            **Mod**: cleat-fgo ${{ steps.version.outputs.mod_ver }}
+            https://github.com/jhq223/cleat-fgo/releases/tag/${{ steps.version.outputs.mod_ver }}
+
+            ---
+            下载 `fgo-mod.apk` 安装即可。
           files: dist/fgo-mod.apk
-          generate_release_notes: true
           make_latest: true
 
       # ═══════════════════════════════════════
-      # 9. 上传 artifact & 缓存版本
+      # 10. 上传 artifact & 缓存版本
       # ═══════════════════════════════════════
       - name: Upload APK artifact
         if: steps.check.outputs.skip != 'true'
