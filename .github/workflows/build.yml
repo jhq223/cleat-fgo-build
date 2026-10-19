@@ -41,18 +41,12 @@ jobs:
       - name: Check for new version
         id: check
         run: |
-          # 手动触发时强制构建，跳过版本检查
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "→ Manual trigger, forcing build."
-            VER=$(curl -sSf -H "User-Agent: Mozilla/5.0" "${XAPK_BASE}/current_ver.json" | python3 -c "import sys,json; print(json.load(sys.stdin)['JP'])")
-            echo "skip=false" >> $GITHUB_OUTPUT
-            echo "xapk_url=${XAPK_BASE}/com.aniplex.fategrandorder.v${VER}.xapk" >> $GITHUB_OUTPUT
-            echo "xapk_ver=${VER}" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
           curl -sSf -H "User-Agent: Mozilla/5.0" "${XAPK_BASE}/current_ver.json" -o current_ver.json
           VER=$(python3 -c "import json; print(json.load(open('current_ver.json'))['JP'])")
+          curl -sSf -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" "${MOD_RELEASES_API}" -o mod-release.json
+          MOD_VER=$(python3 -c "import json; print(json.load(open('mod-release.json'))['tag_name'])")
+          BUILD_ID="${VER}:${MOD_VER}"
+          echo "build_id=$BUILD_ID" >> $GITHUB_OUTPUT
           XAPK_FILE="com.aniplex.fategrandorder.v${VER}.xapk"
           XAPK_URL="${XAPK_BASE}/${XAPK_FILE}"
           echo "Latest: $VER → $XAPK_URL"
@@ -60,7 +54,7 @@ jobs:
           if [ -f .last-version ]; then
             OLD=$(cat .last-version)
             echo "Cached: $OLD"
-            if [ "$VER" = "$OLD" ]; then
+            if [ "$BUILD_ID" = "$OLD" ] && [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
               echo "→ Version unchanged, skipping."
               echo "skip=true" >> $GITHUB_OUTPUT
               exit 0
@@ -126,8 +120,7 @@ jobs:
         if: steps.check.outputs.skip != 'true'
         run: |
           # Query latest release, find the zip asset, download and extract
-          RELEASE_JSON=$(curl -sSf -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" "${MOD_RELEASES_API}")
-          ASSET_URL=$(echo "$RELEASE_JSON" | python3 -c "import sys,json; r=json.load(sys.stdin); print(next(a['browser_download_url'] for a in r['assets'] if a['name'].endswith('.zip')))")
+          ASSET_URL=$(python3 -c "import json; r=json.load(open('mod-release.json')); print(next(a['browser_download_url'] for a in r['assets'] if a['name'].endswith('.zip')))")
           echo "Downloading: $ASSET_URL"
           curl -sSfL -o libs.zip "$ASSET_URL"
           mkdir -p lib
@@ -188,14 +181,15 @@ jobs:
         run: |
           VER=$(grep -oP 'versionName:\s*\K.*' build/apktool_main/apktool.yml | tr -d "'" | xargs)
           echo "FGO version: $VER"
-          echo "tag=v${VER}" >> $GITHUB_OUTPUT
-          echo "name=FGO JP v${VER} (Mod)" >> $GITHUB_OUTPUT
-
           # mod lib version from the release tag we downloaded
-          RELEASE_JSON=$(curl -sSf -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" "${MOD_RELEASES_API}")
-          MOD_VER=$(echo "$RELEASE_JSON" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r['tag_name'])")
+          MOD_VER=$(python3 -c "import json; print(json.load(open('mod-release.json'))['tag_name'])")
+          TAG="v${VER}-mod${MOD_VER#v}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "name=FGO JP v${VER} (cleat-fgo ${MOD_VER})" >> $GITHUB_OUTPUT
           echo "Mod lib version: $MOD_VER"
           echo "mod_ver=$MOD_VER" >> $GITHUB_OUTPUT
+          CODE=$(grep -oP 'versionCode:\s*\K.*' build/apktool_main/apktool.yml | tr -d "'" | xargs)
+          python3 scripts/update_manifest.py --version "v${VER}" --version-code "$CODE" --module-version "$MOD_VER" --tag "$TAG"
 
       # ═══════════════════════════════════════
       # 9. 发 Release + 打 Tag
@@ -214,7 +208,9 @@ jobs:
 
             ---
             下载 `fgo-mod.apk` 安装即可。
-          files: dist/fgo-mod.apk
+          files: |
+            dist/fgo-mod.apk
+            dist/update.json
           make_latest: true
 
       # ═══════════════════════════════════════
@@ -225,12 +221,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: fgo-mod-jp
-          path: dist/fgo-mod.apk
+          path: |
+            dist/fgo-mod.apk
+            dist/update.json
           retention-days: 30
 
       - name: Save version cache
         if: steps.check.outputs.skip != 'true'
-        run: echo "${{ steps.check.outputs.xapk_ver }}" > .last-version
+        run: echo "${{ steps.check.outputs.build_id }}" > .last-version
 
       - name: Persist version cache
         if: steps.check.outputs.skip != 'true'
