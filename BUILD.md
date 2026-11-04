@@ -12,7 +12,9 @@
 
 后续版本使用同一签名，支持覆盖安装并保留应用数据。
 
-进入 Actions → **Build FGO Mod APK (JP)** → **Run workflow**，即可手动构建。计划任务在每周三、五检查游戏和模块版本，发现更新后自动构建。
+打开[构建工作流](https://github.com/jhq223/cleat-fgo-build/actions/workflows/build.yml)，点击 **Run workflow**，选择 `main`，再点击 **Run workflow**。完成后从 Releases 下载 APK。手动运行会重新构建当前游戏和模块版本。
+
+计划任务在每周三、五检查游戏和模块版本，发现更新后自动构建。
 
 构建过程下载游戏 XAPK 和最新模块库，通过 [cleat-fgo-helper](https://github.com/jhq223/cleat-fgo-helper) 打包并签名。
 
